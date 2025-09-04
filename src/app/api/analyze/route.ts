@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readabilityMetrics, originalitySignals, styleSignals, scoreComposite, splitSentences, words } from "@/lib/analysis";
 import { checkLocalPlag } from "@/lib/localPlag";
-import { suggestResources } from "@/lib/resourcesLocal";
+import { autoResources } from "@/lib/resourcesAuto";
+import { featureValues, aiExplain } from "@/lib/explain";
 
 type Issue = { type:string; text:string; fix?:string };
 
@@ -22,30 +23,6 @@ async function llmJSON_direct(prompt:string){
     const raw = m? m[0] : text;
     return JSON.parse(raw);
   }catch{ return null; }
-}
-
-function aiReasons(text:string){
-  const sents = splitSentences(text);
-  const ws = words(text);
-  const lens = sents.map(s=>words(s).length);
-  const mean = lens.reduce((a,b)=>a+b,0)/(lens.length||1);
-  const varc = lens.reduce((a,b)=>a+(b-mean)*(b-mean),0)/(lens.length||1);
-  const burst = Math.sqrt(varc);
-  const reasons:string[] = [];
-  if (ws.length > 200 && burst < 6) reasons.push("Highly uniform sentence lengths (machine-like cadence).");
-  if ((text.match(/\[\d{4}\]/g)||[]).length >= 3 && !(text.match(/https?:\/\//)||[]).length) reasons.push("Citation-like brackets without real links.");
-  if ((text.match(/Firstly|Secondly|Thirdly|In conclusion/gi)||[]).length >= 3) reasons.push("Template transitions overused.");
-  return reasons;
-}
-
-function improvementPlan(read:any, counts:{paragraphs:number}, flags:{links:number}, aiPercent:number){
-  const plan:string[] = [];
-  if (read.fkGrade > 12) plan.push("Reduce grade level to ~10: shorter sentences and simpler wording.");
-  if (counts.paragraphs < Math.max(3, Math.ceil((read.wc||0)/200))) plan.push("Add more paragraphs; one main idea per paragraph.");
-  if (flags.links === 0) plan.push("Add 2–3 credible sources with links or DOIs.");
-  if (aiPercent >= 50) plan.push("Add personal examples or primary data to lower AI suspicion.");
-  if (plan.length === 0) plan.push("Light polish only: tighten sentences and verify any claims.");
-  return plan.slice(0,5);
 }
 
 function heuristicFallback(text:string){
@@ -76,18 +53,19 @@ export async function POST(req: NextRequest){
     const orig = originalitySignals(text);
     const style = styleSignals(text);
 
-    const sys = `Return strict JSON only with keys: grammar(array of {text,fix}), clarity(array of {text,fix}), evidence(array of {text}), improved(string). Rules: Preserve meaning; never invent sources; keep existing quotes/citations; target grade 8–11; shorten if verbose.`;
+    const sys = `Return strict JSON only with keys: grammar(array of {text,fix}), clarity(array of {text,fix}), evidence(array of {text}), improved(string). Rules: Preserve meaning; never invent sources; target grade 8–11; shorten if verbose.`;
     const user = `Text:\n${text}\n\nFind up to 8 grammar issues, 8 clarity issues, 5 evidence gaps. Provide an improved version that keeps citations/quotes.`;
     const llm = await llmJSON_direct(`${sys}\n${user}`);
+    const fb = heuristicFallback(text);
 
-    const fallback = heuristicFallback(text);
-    const grammarArr:Issue[] = (Array.isArray(llm?.grammar) ? llm!.grammar : fallback.grammar).slice(0,8);
-    const clarityArr:Issue[] = (Array.isArray(llm?.clarity) ? llm!.clarity : fallback.clarity).slice(0,8);
-    const evidenceArr:Issue[] = (Array.isArray(llm?.evidence) ? llm!.evidence : fallback.evidence).slice(0,5);
-    const improved: string | undefined = typeof llm?.improved === "string" ? llm!.improved : undefined;
+    const grammarArr:Issue[]   = (Array.isArray(llm?.grammar) ? llm!.grammar   : fb.grammar).slice(0,8);
+    const clarityArr:Issue[]   = (Array.isArray(llm?.clarity) ? llm!.clarity   : fb.clarity).slice(0,8);
+    const evidenceArr:Issue[]  = (Array.isArray(llm?.evidence)? llm!.evidence  : fb.evidence).slice(0,5);
+    const improved: string|undefined = typeof llm?.improved === "string" ? llm!.improved : undefined;
 
-    const localPlag = await checkLocalPlag(text);
-    const reasons = aiReasons(text);
+    // local overlap (kept server-side; UI may or may not show it)
+    let localPlag:any;
+    try { localPlag = await checkLocalPlag(text); } catch { localPlag = { enabled:false, checked:0, matched:0, score:0, results:[] }; }
 
     const llmHints = {
       grammarPenalty: Math.min(15, grammarArr.length),
@@ -103,19 +81,41 @@ export async function POST(req: NextRequest){
       llmHints
     );
 
-    const base = composite.aiRisk;
-    const bonus = reasons.length >= 2 ? 10 : reasons.length === 1 ? 5 : 0;
-    const aiPercent = Math.max(0, Math.min(100, Math.round(base + bonus)));
+    // features + explained AI%
+    const feats = featureValues(
+      text,
+      { repetition: orig.repetition, links: orig.links },
+      { burstiness: style.burstiness, passiveHits: style.passiveHits, entropy: style.entropy, stopRatio: style.stopRatio }
+    );
+    const explain = aiExplain(feats);
 
-    const plan = improvementPlan(read as any, { paragraphs: paras.length }, { links: (text.match(/https?:\/\/|www\./gi)||[]).length }, aiPercent);
-    const resources = suggestResources(text);
+    const resources = await autoResources(text);
+
+    // ---- Confidence & short-sample gating ----
+    const wc = read.wc, sc = read.sc, paragraphs = paras.length;
+    const tooShort = wc < 120 || sc < 5; // stricter gate
+    const qualityConfidence = Math.round(
+      100 * Math.min(1,
+        0.65*Math.min(1, wc/300) +
+        0.25*Math.min(1, sc/10) +
+        0.10*Math.min(1, paragraphs/4)
+      )
+    );
+    const aiConfidence = Math.round(
+      100 * Math.min(1,
+        0.7*Math.min(1, wc/350) + 0.3*Math.min(1, sc/10)
+      )
+    );
+    let blsFinal = composite.bls;
+    if (tooShort) blsFinal = Math.min(composite.bls, 25); // cap on tiny samples
 
     return NextResponse.json({
-      bls: composite.bls,
+      bls: blsFinal,
       aiRisk: composite.aiRisk,
-      aiPercent,
-      aiReasons: reasons,
-      verdict: aiPercent >= 70 ? "HIGH" : aiPercent >= 40 ? "MEDIUM" : "LOW",
+      aiPercent: explain.aiPercent,
+      aiExplain: explain,
+      features: feats,
+      verdict: explain.aiPercent >= 70 ? "HIGH" : explain.aiPercent >= 40 ? "MEDIUM" : "LOW",
       breakdown: composite.breakdown,
       readability: {
         flesch: read.flesch, fkGrade: read.fkGrade, gunning: read.gunning,
@@ -123,15 +123,22 @@ export async function POST(req: NextRequest){
       },
       counts: { words: read.wc, sentences: read.sc, paragraphs: paras.length, unique: (new Set((text.toLowerCase().match(/[a-z']+/gi) ?? []))).size },
       flags: { quotesRatio: orig.quotesRatio, links: orig.links, passiveHits: style.passiveHits, weaselHits: style.weaselHits },
-      plagiarism: localPlag,            // now LOCAL ONLY
+      plagiarism: localPlag,
       suggestions: { grammar: grammarArr, clarity: clarityArr, evidence: evidenceArr },
       improved,
-      improvementPlan: plan,
-      resources,                        // curated, local
+      improvementPlan: [
+        ...(read.fkGrade > 12 ? ["Reduce grade level to ~10: shorter sentences and simpler wording."] : []),
+        ...(paras.length < Math.max(3, Math.ceil((read.wc||0)/200)) ? ["Add more paragraphs; one main idea per paragraph."] : []),
+        ...((text.match(/https?:\/\/|www\./gi)||[]).length===0 ? ["Add 2–3 credible sources with links or DOIs."] : []),
+        ...(explain.aiPercent >= 50 ? ["Add personal examples or primary data to lower AI suspicion."] : []),
+        "Light polish: tighten sentences and verify any claims."
+      ],
+      resources,
+      confidence: { quality: qualityConfidence, ai: aiConfidence, tooShort },
       notes: [
-        "Plagiarism is local to bundled corpus; add more files in /public/corpus to improve coverage.",
-        "AI risk is an indicator; use with judgment.",
-        "BLS weights: Originality 35, Clarity 25, Evidence 15, Structure 10, Voice 10, Mechanics 5."
+        "AI % = weighted sum of feature contributions (see 'Why this AI %').",
+        "BLS weights: Originality 35, Clarity 25, Evidence 15, Structure 10, Voice 10, Mechanics 5.",
+        ...(tooShort ? ["Short sample: metrics are capped and less reliable. Add more text for stable readings."] : [])
       ]
     });
   } catch (e:any) {

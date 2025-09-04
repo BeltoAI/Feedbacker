@@ -1,18 +1,16 @@
 export default function ProgressRing({ value, size=96, stroke=10, label }:{ value:number; size?:number; stroke?:number; label?:string }){
-  const r = (size - stroke) / 2;
-  const c = 2 * Math.PI * r;
-  const off = c - (value/100)*c;
+  const pct=Math.max(0,Math.min(100,Math.round(value||0)));
+  const r=(size/2)-stroke; const c=2*Math.PI*r; const dash=(pct/100)*c; const off=c-dash;
   return (
-    <div className="flex items-center gap-4">
-      <svg width={size} height={size} className="shrink-0">
-        <circle cx={size/2} cy={size/2} r={r} stroke="#e5e7eb" strokeWidth={stroke} fill="none"/>
+    <div className="inline-block text-current" style={{width:size,height:size}}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="block">
+        <circle cx={size/2} cy={size/2} r={r} stroke="currentColor" opacity="0.15" strokeWidth={stroke} fill="none" />
         <circle cx={size/2} cy={size/2} r={r} stroke="currentColor" strokeWidth={stroke} fill="none"
-          strokeDasharray={c} strokeDashoffset={off} strokeLinecap="round" />
+          strokeLinecap="round" strokeDasharray={`${c} ${c}`} strokeDashoffset={off}
+          style={{ transform:"rotate(-90deg)", transformOrigin:"50% 50%" }}/>
+        <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle" className="fill-current" style={{fontSize: size*0.28, fontWeight:600}}>{pct}</text>
       </svg>
-      <div>
-        <div className="text-4xl leading-6">{Math.round(value)}</div>
-        {label && <div className="text-sm text-gray-500">{label}</div>}
-      </div>
+      {label && <div className="text-xs text-gray-700 text-center mt-1 truncate">{label}</div>}
     </div>
   );
 }

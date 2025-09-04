@@ -1,14 +1,5 @@
-# Dependencies & build
-node_modules/
-.next/
-out/
-.vercel/
-dist/
-coverage/
-
-# Env & local
+node_modules
+.next
 .env*
-npm-debug.log*
-yarn-error.log*
+*.log
 .DS_Store
-*.local

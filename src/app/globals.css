@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+* { box-sizing: border-box; min-width: 0; }
+section { max-width: 100%; }
+a, li, pre, code, p { word-break: break-word; overflow-wrap: anywhere; }
+svg { display:block; max-width:100%; overflow:visible; }
+
 @media print {
   .no-print { display:none !important; }
   .print-pg { page-break-inside: avoid; }
