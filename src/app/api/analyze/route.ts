@@ -1,3 +1,4 @@
+export const runtime = "nodejs";
 import { NextRequest, NextResponse } from "next/server";
 import { readabilityMetrics, originalitySignals, styleSignals, scoreComposite, splitSentences, words } from "@/lib/analysis";
 import { checkLocalPlag } from "@/lib/localPlag";
