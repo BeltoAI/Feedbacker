@@ -1,0 +1,14 @@
+# Dependencies & build
+node_modules/
+.next/
+out/
+.vercel/
+dist/
+coverage/
+
+# Env & local
+.env*
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+*.local
