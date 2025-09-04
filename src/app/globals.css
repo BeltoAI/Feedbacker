@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 @media print {
-  .no-print { display: none !important; }
+  .no-print { display:none !important; }
   .print-pg { page-break-inside: avoid; }
+  body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }

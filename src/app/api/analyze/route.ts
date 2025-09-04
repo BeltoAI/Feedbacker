@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readabilityMetrics, originalitySignals, styleSignals, scoreComposite, splitSentences, words } from "@/lib/analysis";
-import { checkPlagiarism } from "@/lib/plagiarism";
-import { studyResources } from "@/lib/resources";
+import { checkLocalPlag } from "@/lib/localPlag";
+import { suggestResources } from "@/lib/resourcesLocal";
 
 type Issue = { type:string; text:string; fix?:string };
 
@@ -33,7 +33,6 @@ function aiReasons(text:string){
   const burst = Math.sqrt(varc);
   const reasons:string[] = [];
   if (ws.length > 200 && burst < 6) reasons.push("Highly uniform sentence lengths (machine-like cadence).");
-  if ((text.match(/As an AI language model/gi)||[]).length) reasons.push("Contains AI system self-disclosure phrase.");
   if ((text.match(/\[\d{4}\]/g)||[]).length >= 3 && !(text.match(/https?:\/\//)||[]).length) reasons.push("Citation-like brackets without real links.");
   if ((text.match(/Firstly|Secondly|Thirdly|In conclusion/gi)||[]).length >= 3) reasons.push("Template transitions overused.");
   return reasons;
@@ -87,7 +86,7 @@ export async function POST(req: NextRequest){
     const evidenceArr:Issue[] = (Array.isArray(llm?.evidence) ? llm!.evidence : fallback.evidence).slice(0,5);
     const improved: string | undefined = typeof llm?.improved === "string" ? llm!.improved : undefined;
 
-    const plag = await checkPlagiarism(text);
+    const localPlag = await checkLocalPlag(text);
     const reasons = aiReasons(text);
 
     const llmHints = {
@@ -104,19 +103,17 @@ export async function POST(req: NextRequest){
       llmHints
     );
 
-    // ---- AI % calculation (simple & transparent) ----
-    // Base on aiRisk (0..100), add +10 if multiple explicit reasons, clamp 0..100
     const base = composite.aiRisk;
     const bonus = reasons.length >= 2 ? 10 : reasons.length === 1 ? 5 : 0;
     const aiPercent = Math.max(0, Math.min(100, Math.round(base + bonus)));
 
     const plan = improvementPlan(read as any, { paragraphs: paras.length }, { links: (text.match(/https?:\/\/|www\./gi)||[]).length }, aiPercent);
-    const resources = await studyResources(text);
+    const resources = suggestResources(text);
 
     return NextResponse.json({
       bls: composite.bls,
       aiRisk: composite.aiRisk,
-      aiPercent,                 // <-- NEW (e.g., 30)
+      aiPercent,
       aiReasons: reasons,
       verdict: aiPercent >= 70 ? "HIGH" : aiPercent >= 40 ? "MEDIUM" : "LOW",
       breakdown: composite.breakdown,
@@ -126,13 +123,13 @@ export async function POST(req: NextRequest){
       },
       counts: { words: read.wc, sentences: read.sc, paragraphs: paras.length, unique: (new Set((text.toLowerCase().match(/[a-z']+/gi) ?? []))).size },
       flags: { quotesRatio: orig.quotesRatio, links: orig.links, passiveHits: style.passiveHits, weaselHits: style.weaselHits },
-      plagiarism: plag,
+      plagiarism: localPlag,            // now LOCAL ONLY
       suggestions: { grammar: grammarArr, clarity: clarityArr, evidence: evidenceArr },
       improved,
-      improvementPlan: plan,     // <-- NEW
-      resources,                 // <-- NEW
+      improvementPlan: plan,
+      resources,                        // curated, local
       notes: [
-        plag.enabled ? `Plagiarism search checked ${plag.checked} shingles; matches: ${plag.matched}.` : "Plagiarism search disabled (missing SERPER_API_KEY).",
+        "Plagiarism is local to bundled corpus; add more files in /public/corpus to improve coverage.",
         "AI risk is an indicator; use with judgment.",
         "BLS weights: Originality 35, Clarity 25, Evidence 15, Structure 10, Voice 10, Mechanics 5."
       ]
